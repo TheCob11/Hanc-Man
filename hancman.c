@@ -11,23 +11,39 @@ typedef uint32_t LSet; // Letter Set
 typedef struct Game Game;
 typedef struct Guess Guess;
 typedef struct GameRec GameRec;
-size_t readDict();
 char *dict;
+size_t numWords;
+size_t readDict();
 Game humanHost();
 Game botHost();
 GameRec playHuman(Game g);
 GameRec playBotProb(Game g, bool print);
+Guess guessProb(Game *g, char *dict, bool print, char *newDict);
 GameRec playBotInfo(Game g, bool print);
-double binaryEntropy(double p)
+static inline double binaryEntropy(double p)
 {
     return -p * log2(p) - (1 - p) * log2(1 - p);
 }
-void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, regex_t *re);
+void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, char *newDict, regex_t *re);
 int compPattern(regex_t *dest, Game g);
 void drawMan(int lives);
-bool getL(LSet set, char l);
-void toggL(LSet *set, char l);
-bool setL(LSet *set, char l, bool val);
+static inline bool getL(LSet set, char l) // Returns whether l is in set
+{
+    return (set >> (l - 'A')) & 1;
+}
+static inline void toggL(LSet *set, char l) // If set[l] is 1, switch to 0 and vice versa
+{
+    *set ^= 1 << (l - 'A');
+}
+static inline bool setL(LSet *set, char l, bool val) // Sets set[l] to val
+{
+    if (getL(*set, l) != val)
+    {
+        toggL(set, l);
+        return true;
+    }
+    return false;
+}
 bool lSubset(LSet A, LSet B);
 LSet strToLSet(char *str);
 void lSetToStr(char *dest, LSet l);
@@ -47,10 +63,10 @@ char getGuessInput(LSet guessed);
 enum Strategies
 {
     HUMAN,
-    QUANTITY,
+    PROBABILITY,
     ENTROPY
 };
-char *STRAT_NAMES[3] = {"HUMAN", "QUANTITY", "ENTROPY"};
+char *STRAT_NAMES[3] = {"HUMAN", "PROBABILITY", "ENTROPY"};
 struct Guess
 {
     Game state;
@@ -67,33 +83,41 @@ struct GameRec
 size_t readDict()
 {
     if (dict != NULL)
-        return 0;
+        return numWords;
     FILE *f = fopen("dictionary.txt", "r");
-    size_t len = 0;
-    size_t written = getdelim(&dict, &len, '\0', f);
+    fseek(f, 0, SEEK_END);
+    dict = malloc(ftell(f));
+    rewind(f);
+    static char word[20];
+    while (fgets(word, 20, f) != NULL)
+    {
+        strncat(dict, word, 16);
+        ++numWords;
+    }
     fclose(f);
-    return written;
+    return numWords;
 }
 Game humanHost()
 {
     static char wordInput[16];
-    printf("\nPlaying 2-Player!\nEXECUTIONER, input a word: \e[8m");
-    scanf("%15s", wordInput);
-    printf("\e[2K\e[28mEXECUTIONER entered a word!\n");
+    printf("\nPlaying 2-Player!\nEXECUTIONER, input a word: \033[8m");
+    while (!scanf("%15s", wordInput))
+        ;
+    printf("\033[2K\033[28mEXECUTIONER entered a word!\n");
     return newGame(wordInput);
 }
 Game botHost()
 {
     srand(clock());
     FILE *f = fopen("dictionary.txt", "r");
-    size_t words = 0, wordIndex;
+    readDict();
+    size_t wordIndex;
     static char word[20];
-    while (fgets(word, 20, f) != NULL)
-        ++words;
-    wordIndex = (((long)rand() << 32) | rand()) % words;
-    rewind(f);
-    for (int i = 0; i < wordIndex; i++)
-        fscanf(f, "%15s", word);
+    wordIndex = ((((size_t)rand()) << 32) | rand()) % numWords;
+    for (unsigned int i = 0; i < wordIndex; i++)
+        while (!fscanf(f, "%15s", word))
+            ;
+    fclose(f);
     // printf("Out of %ld words, #%ld was picked: %s", words, wordIndex, word);
 
     return newGame(word);
@@ -134,36 +158,15 @@ GameRec playHuman(Game g)
 }
 GameRec playBotProb(Game g, bool print)
 {
-    readDict();
-    size_t maxN;
-    char maxL;
-    regex_t pat;
-    compPattern(&pat, g);
-    size_t occurs[26];
     GameRec rec;
-    for (int i = 0; !g.done; i++)
+    readDict();
+    char dictPre[numWords * (g.wordLen + 1)], dictPost[numWords * (g.wordLen + 1)];
+    rec.guesses[0] = guessProb(&g, dict, print, dictPre);
+    for (int i = 1; !g.done; i++)
     {
-        if (print)
-            drawGame(g);
-        memset(occurs, 0, sizeof(occurs));
-        writeOccurances(occurs, g.guessed, g.wordLen, dict, &pat);
-        maxL = 'A';
-        maxN = occurs[0];
-        for (int i = 0; i < 26; i++)
-        {
-            if (print)
-                printf("%c: %lu | ", 'A' + i, occurs[i]);
-            if (occurs[i] > maxN)
-            {
-                maxL = 'A' + i;
-                maxN = occurs[i];
-            }
-        }
-        if (print)
-            printf("Max: %c(%lu)\n", maxL, maxN);
-        rec.guesses[i] = (Guess){g, maxL, maxN, QUANTITY, guess(&g, maxL)};
-        compPattern(&pat, g);
+        rec.guesses[i] = guessProb(&g, i % 2 ? dictPre : dictPost, print, i % 2 ? dictPost : dictPre);
     }
+    // for(int i=0; !g.done; i++) rec.guesses[i] = guessProb(&g, dict, print, NULL);
     if (print)
     {
         drawGame(g);
@@ -171,6 +174,33 @@ GameRec playBotProb(Game g, bool print)
     }
     rec.final = g;
     return rec;
+}
+Guess guessProb(Game *g, char *dict, bool print, char *newDict)
+{
+    size_t maxN;
+    char maxL;
+    regex_t pat;
+    size_t occurs[26];
+    compPattern(&pat, *g);
+    if (print)
+        drawGame(*g);
+    memset(occurs, 0, sizeof(occurs));
+    writeOccurances(occurs, g->guessed, g->wordLen, dict, newDict, &pat);
+    maxL = 'A';
+    maxN = occurs[0];
+    for (int i = 0; i < 26; i++)
+    {
+        if (print)
+            printf("%c: %lu | ", 'A' + i, occurs[i]);
+        if (occurs[i] > maxN)
+        {
+            maxL = 'A' + i;
+            maxN = occurs[i];
+        }
+    }
+    if (print)
+        printf("Max: %c(%lu)\n", maxL, maxN);
+    return (Guess){*g, maxL, maxN, PROBABILITY, guess(g, maxL)};
 }
 GameRec playBotInfo(Game g, bool print)
 {
@@ -186,7 +216,7 @@ GameRec playBotInfo(Game g, bool print)
         if (print)
             drawGame(g);
         memset(occurs, 0, sizeof(occurs));
-        writeOccurances(occurs, g.guessed, g.wordLen, dict, &pat);
+        writeOccurances(occurs, g.guessed, g.wordLen, dict, NULL, &pat);
         maxL = 'A';
         maxEnt = 0;
         occursT = 0;
@@ -218,25 +248,36 @@ GameRec playBotInfo(Game g, bool print)
     rec.final = g;
     return rec;
 }
-void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, regex_t *re)
+void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, char *newDict, regex_t *re)
 {
     LSet currSet;
     regmatch_t match = {.rm_so = 0};
     char currWord[wordLen + 1];
     int regErr = 0;
-    // printf("First 35(if that) matches:");
-    for (/*size_t i=0*/; regErr == 0; /*i++*/)
+    if (newDict)
+        strcpy(newDict, "");
+    while (!regErr)
     {
         if ((regErr = regexec(re, dict, 1, &match, 0)) != 0)
             return;
         strncpy(currWord, dict + match.rm_so, wordLen);
         currWord[wordLen] = '\0';
-        currSet = strToLSet(currWord);
-        // if(i<35) printf("\n%s\n", currWord);
-        // printLSet(currSet);
-        for (char i = 'A'; i <= 'Z'; i++)
+        if (newDict)
         {
-            arr[i - 'A'] += getL(currSet & (~guessed), i);
+            strcat(newDict, currWord);
+            strcat(newDict, "\n");
+        }
+        // currSet = strToLSet(currWord);
+        // for (int i = 0; i < 26; i++)
+        // {
+        //     if ((currDiff = (currSet & (~guessed)) >> (i)))
+        //         arr[i] += currDiff & 1;
+        //     else break;
+        // }
+        currSet = 0;
+        for (int i = 0; currWord[i]; i++)
+        {
+            arr[currWord[i] - 'A'] += (setL(&currSet, currWord[i], 1) & !getL(guessed, currWord[i]));
         }
         dict += match.rm_so + wordLen;
     }
@@ -255,15 +296,15 @@ int compPattern(regex_t *dest, Game g)
     negLen = strlen(neg);
     char pat[g.wordLen * negLen + 1 * 2 + 1];
     strcpy(pat, "^");
-    for (char *i = g.word; *i != '\0'; i++)
+    for (int i = 0; i < g.wordLen; i++)
     {
-        if (getL(g.guessed, *i))
+        if (getL(g.guessed, g.word[i]))
         {
-            strncat(pat, i, 1);
+            strncat(pat, g.word + i, 1);
         }
         else
         {
-            strncat(pat, neg, negLen);
+            strcat(pat, neg);
         }
     };
     strcat(pat, "$\0");
@@ -319,11 +360,12 @@ bool guess(Game *g, char l)
 }
 char getGuessInput(LSet guessed)
 {
-    char guess;
+    char guess = 0;
     while (!guess)
     {
         printf("RESCUER, guess a letter: ");
-        scanf(" %c", &(guess));
+        while (!scanf(" %c", &(guess)))
+            ;
         // printf("%c", guess);
         if (!isalpha(guess))
         {
@@ -339,22 +381,6 @@ char getGuessInput(LSet guessed)
     return guess;
 }
 
-bool getL(LSet set, char l)
-{
-    return (set >> (l - 65)) & 1;
-}
-void toggL(LSet *set, char l)
-{
-    *set ^= 1 << (l - 65);
-}
-bool setL(LSet *set, char l, bool val)
-{
-    if (val != 0 && val != 1)
-        return false;
-    if (getL(*set, l) != val)
-        toggL(set, l);
-    return true;
-}
 bool lSubset(LSet A, LSet B)
 {
     return (A & B) == A;
@@ -362,8 +388,9 @@ bool lSubset(LSet A, LSet B)
 LSet strToLSet(char *str)
 {
     LSet s = 0;
-    for (char *l = str; *l != '\0'; l++)
-        setL(&s, toupper(*l), 1);
+    char l;
+    while ((l = *(str++)))
+        setL(&s, toupper(l), 1);
     return s;
 }
 void lSetToStr(char *dest, LSet l)
@@ -378,7 +405,7 @@ void lSetToStr(char *dest, LSet l)
 void printBlanks(char *word, LSet guessed)
 {
     printf("\n");
-    for (int i = 0; i < strlen(word); i++)
+    for (unsigned int i = 0; i < strlen(word); i++)
     {
         printf("%c ", getL(guessed, word[i]) ? word[i] : '_');
     }
@@ -392,25 +419,25 @@ void printLSet(LSet s)
     {
         l = i + 65;
         if (getL(s, l))
-            printf("\e[2m");
-        printf("%c\e[22m ", l);
+            printf("\033[2m");
+        printf("%c\033[22m ", l);
     }
     printf("\n");
 }
 void printGameRec(GameRec r)
 {
     Guess gs;
-    printf("\nLETTER\t|DATA\t\t|STRAT\t\t|RIGHT\n");
+    printf("\nLETTER\t|DATA\t\t|STRAT\t\t|IN \"%s\"\n", r.final.word);
     for (int i = 0; i != r.final.numGuesses; i++)
     {
         gs = r.guesses[i];
         printf("%c\t|%8f\t|%-8s\t|%s\n", gs.letter, gs.data, STRAT_NAMES[gs.strat], gs.right ? "Y" : "N");
     }
 }
-int main(int argc, char *argv[])
+int main()
 {
-    printGameRec(playBotInfo(botHost(), true));
-    printf("\n");
+    for (int i = 0; i < 100; i++)
+        playBotProb(botHost(), false);
     free(dict);
     return 0;
 }
