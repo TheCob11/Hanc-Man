@@ -19,12 +19,13 @@ Game botHost();
 GameRec playHuman(Game g);
 GameRec playBotProb(Game g, bool print);
 Guess guessProb(Game *g, char *dict, bool print, char *newDict);
-GameRec playBotInfo(Game g, bool print);
+GameRec playBotEntr(Game g, bool print);
+Guess guessEntr(Game *g, char *dict, bool print, char *newDict);
 static inline double binaryEntropy(double p)
 {
     return -p * log2(p) - (1 - p) * log2(1 - p);
 }
-void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, char *newDict, regex_t *re);
+void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, char *newDict, regex_t *re, size_t *numWords);
 int compPattern(regex_t *dest, Game g);
 void drawMan(int lives);
 static inline bool getL(LSet set, char l) // Returns whether l is in set
@@ -88,8 +89,8 @@ size_t readDict()
     fseek(f, 0, SEEK_END);
     dict = malloc(ftell(f));
     rewind(f);
-    static char word[20];
-    while (fgets(word, 20, f) != NULL)
+    static char word[17];
+    while (fgets(word, 17, f) != NULL)
     {
         strncat(dict, word, 16);
         ++numWords;
@@ -161,12 +162,15 @@ GameRec playBotProb(Game g, bool print)
     GameRec rec;
     readDict();
     char dictPre[numWords * (g.wordLen + 1)], dictPost[numWords * (g.wordLen + 1)];
+    if (print)
+        drawGame(g);
     rec.guesses[0] = guessProb(&g, dict, print, dictPre);
     for (int i = 1; !g.done; i++)
     {
+        if (print)
+            drawGame(g);
         rec.guesses[i] = guessProb(&g, i % 2 ? dictPre : dictPost, print, i % 2 ? dictPost : dictPre);
     }
-    // for(int i=0; !g.done; i++) rec.guesses[i] = guessProb(&g, dict, print, NULL);
     if (print)
     {
         drawGame(g);
@@ -182,10 +186,8 @@ Guess guessProb(Game *g, char *dict, bool print, char *newDict)
     regex_t pat;
     size_t occurs[26];
     compPattern(&pat, *g);
-    if (print)
-        drawGame(*g);
     memset(occurs, 0, sizeof(occurs));
-    writeOccurances(occurs, g->guessed, g->wordLen, dict, newDict, &pat);
+    writeOccurances(occurs, g->guessed, g->wordLen, dict, newDict, &pat, NULL);
     maxL = 'A';
     maxN = occurs[0];
     for (int i = 0; i < 26; i++)
@@ -202,43 +204,19 @@ Guess guessProb(Game *g, char *dict, bool print, char *newDict)
         printf("Max: %c(%lu)\n", maxL, maxN);
     return (Guess){*g, maxL, maxN, PROBABILITY, guess(g, maxL)};
 }
-GameRec playBotInfo(Game g, bool print)
+GameRec playBotEntr(Game g, bool print)
 {
     readDict();
-    char maxL;
-    regex_t pat;
-    compPattern(&pat, g);
-    size_t occurs[26];
-    double currEnt, maxEnt, occursT;
     GameRec rec;
-    for (int i = 0; !g.done; i++)
+    char dictPre[numWords * (g.wordLen + 1)], dictPost[numWords * (g.wordLen + 1)];
+    if (print)
+        drawGame(g);
+    rec.guesses[0] = guessEntr(&g, dict, print, dictPre);
+    for (int i = 1; !g.done; i++)
     {
         if (print)
             drawGame(g);
-        memset(occurs, 0, sizeof(occurs));
-        writeOccurances(occurs, g.guessed, g.wordLen, dict, NULL, &pat);
-        maxL = 'A';
-        maxEnt = 0;
-        occursT = 0;
-        for (int i = 0; i < 26; i++)
-            occursT += occurs[i];
-        for (int i = 0; i < 26; i++)
-        {
-            if (occurs[i] == 0)
-                continue;
-            currEnt = binaryEntropy(occurs[i] / occursT);
-            if (print)
-                printf("%c: Occurance(s): %lu  Proability: %f  Entropy: %f\n", 'A' + i, occurs[i], occurs[i] / occursT, currEnt);
-            if (currEnt > maxEnt || occurs[i] / occursT == 1)
-            {
-                maxL = 'A' + i;
-                maxEnt = currEnt;
-            }
-        }
-        if (print)
-            printf("Max: %c(%f)\n", maxL, maxEnt);
-        rec.guesses[i] = (Guess){g, maxL, maxEnt, ENTROPY, guess(&g, maxL)};
-        compPattern(&pat, g);
+        rec.guesses[i] = guessEntr(&g, i % 2 ? dictPre : dictPost, print, i % 2 ? dictPost : dictPre);
     }
     if (print)
     {
@@ -248,7 +226,34 @@ GameRec playBotInfo(Game g, bool print)
     rec.final = g;
     return rec;
 }
-void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, char *newDict, regex_t *re)
+Guess guessEntr(Game *g, char *dict, bool print, char *newDict)
+{
+    size_t occurs[26], numWords;
+    double currProb, currEnt, maxEnt = 0;
+    char maxL = 'A';
+    regex_t pat;
+    compPattern(&pat, *g);
+    memset(occurs, 0, sizeof(occurs));
+    writeOccurances(occurs, g->guessed, g->wordLen, dict, newDict, &pat, &numWords);
+    for (int i = 0; i < 26; i++)
+    {
+        if (occurs[i] == 0)
+            continue;
+        currProb = occurs[i] / (double)numWords;
+        currEnt = binaryEntropy(currProb);
+        if (print)
+            printf("%c: Occurance(s): %lu  Proability: %f  Entropy: %f\n", 'A' + i, occurs[i], currProb, currEnt);
+        if (currEnt > maxEnt || currProb == 1)
+        {
+            maxL = 'A' + i;
+            maxEnt = currEnt;
+        }
+    }
+    if (print)
+        printf("Max: %c(%f)\n", maxL, maxEnt);
+    return (Guess){*g, maxL, maxEnt, ENTROPY, guess(g, maxL)};
+}
+void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, char *newDict, regex_t *re, size_t *numWords)
 {
     LSet currSet;
     regmatch_t match = {.rm_so = 0};
@@ -259,7 +264,7 @@ void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, char *n
     while (!regErr)
     {
         if ((regErr = regexec(re, dict, 1, &match, 0)) != 0)
-            return;
+            break;
         strncpy(currWord, dict + match.rm_so, wordLen);
         currWord[wordLen] = '\0';
         if (newDict)
@@ -279,6 +284,8 @@ void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, char *n
         {
             arr[currWord[i] - 'A'] += (setL(&currSet, currWord[i], 1) & !getL(guessed, currWord[i]));
         }
+        if (numWords)
+            (*numWords)++;
         dict += match.rm_so + wordLen;
     }
 }
@@ -436,8 +443,8 @@ void printGameRec(GameRec r)
 }
 int main()
 {
-    for (int i = 0; i < 100; i++)
-        playBotProb(botHost(), false);
+    for (int i = 0; i < 30; i++)
+        playBotEntr(botHost(), false);
     free(dict);
     return 0;
 }
