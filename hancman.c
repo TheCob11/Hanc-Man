@@ -7,6 +7,8 @@
 #include <time.h>
 #include <math.h>
 #include "regex.h"
+#include <omp.h>
+#define NUM_GAMES 512
 typedef uint32_t LSet; // Letter Set
 typedef struct Game Game;
 typedef struct Guess Guess;
@@ -92,6 +94,7 @@ struct GameRec
 };
 GameRec printGameRec(GameRec r);
 void saveGameRec(GameRec r, char *fileName);
+void saveGameRecs(GameRec *r, size_t count, char *fileName);
 size_t readDict()
 {
     if (dict != NULL)
@@ -126,7 +129,7 @@ Game botHost()
     size_t wordIndex;
     static char word[20];
     wordIndex = ((((size_t)rand()) << 32) | rand()) % numWords;
-    for (unsigned int i = 0; i < wordIndex; i++)
+    for (size_t i = 0; i < wordIndex; i++)
         while (!fscanf(f, "%15s", word))
             ;
     fclose(f);
@@ -141,14 +144,14 @@ void botHostMany(Game *gameArr, size_t count)
     readDict();
     size_t wordIndices[count], wordIndexMax = 0, currGame = 0;
     static char word[20];
-    for (unsigned int i = 0; i < count; i++)
+    for (size_t i = 0; i < count; i++)
     {
         wordIndices[i] = ((((size_t)rand()) << 32) | rand()) % numWords;
         if (wordIndices[i] > wordIndexMax)
             wordIndexMax = wordIndices[i];
     }
     qsort(wordIndices, count, sizeof(size_t), &compare);
-    for (unsigned int i = 0; i <= wordIndexMax; i++)
+    for (size_t i = 0; i <= wordIndexMax; i++)
     {
         fscanf(f, "%15s", word);
         if (i == wordIndices[currGame])
@@ -270,6 +273,8 @@ Guess guessEntr(Game *g, char *dict, bool print, char *newDict)
     compPattern(&pat, *g);
     memset(occurs, 0, sizeof(occurs));
     writeOccurances(occurs, g->guessed, g->wordLen, dict, newDict, &pat, &numWords);
+    if (print)
+        printf("%lu words\n", numWords);
     for (int i = 0; i < 26; i++)
     {
         if (occurs[i] == 0)
@@ -277,7 +282,7 @@ Guess guessEntr(Game *g, char *dict, bool print, char *newDict)
         currProb = occurs[i] / (double)numWords;
         currEnt = binaryEntropy(currProb);
         if (print)
-            printf("%c: Occurance(s): %lu  Proability: %f  Entropy: %f\n", 'A' + i, occurs[i], currProb, currEnt);
+            printf("%c: Occurance(s): %lu  Proability: %.17g  Entropy: %.17g\n", 'A' + i, occurs[i], currProb, currEnt);
         if (currEnt > maxEnt || currProb == 1)
         {
             maxL = 'A' + i;
@@ -285,7 +290,7 @@ Guess guessEntr(Game *g, char *dict, bool print, char *newDict)
         }
     }
     if (print)
-        printf("Max: %c(%f)\n", maxL, maxEnt);
+        printf("Max: %c(%.17g)\n", maxL, maxEnt);
     return (Guess){*g, maxL, maxEnt, ENTROPY, guess(g, maxL)};
 }
 void writeOccurances(size_t *arr, LSet guessed, int wordLen, char *dict, char *newDict, regex_t *re, size_t *numWords)
@@ -378,7 +383,8 @@ void drawGame(Game g)
 Game newGame(char *word)
 {
     Game g = {.lives = 6, .wordLen = strlen(word), .numGuesses = 0, .right = strToLSet(word), .guessed = (LSet)0, .wrongs = (LSet)0, .done = false};
-    for(int i=0; word[i]; i++) g.word[i] = word[i];
+    for (int i = 0; word[i]; i++)
+        g.word[i] = word[i];
     return g;
 }
 bool guess(Game *g, char l)
@@ -481,29 +487,50 @@ GameRec printGameRec(GameRec r)
 void saveGameRec(GameRec r, char *fileName)
 {
     Guess gs;
-    FILE *f;
-    char header[43] = "WORD,GUESS #,LETTER,DATA,STRATEGY,CORRECT\n", buf[43], *word = r.final.word;
-    f = fopen(fileName, "a+");
+    FILE *f = fopen(fileName, "a+");
+    char header[43] = "WORD,GUESS #,LETTER,DATA,STRATEGY,CORRECT\n", buf[43];
     fgets(buf, 43, f);
     if (strcmp(header, buf))
         fprintf(f, "%s", header);
     fseek(f, 0, SEEK_END);
-    for (int i = 0; i != r.final.numGuesses; i++)
+    for (int i = 0; i < r.final.numGuesses; i++)
     {
         gs = r.guesses[i];
-        fprintf(f, "%s,%d,%c,%f,%s,%c\n", word, i, gs.letter, gs.data, STRAT_NAMES[gs.strat], gs.right ? 'Y' : 'N');
+        fprintf(f, "%s,%d,%c,%.17g,%s,%c\n", r.final.word, i, gs.letter, gs.data, STRAT_NAMES[gs.strat], gs.right ? 'Y' : 'N');
     }
 }
+void saveGameRecs(GameRec *recs, size_t count, char *fileName)
+{
+    GameRec r;
+    Guess gs;
+    FILE *f = fopen(fileName, "a+");
+    char header[43] = "WORD,GUESS #,LETTER,DATA,STRATEGY,CORRECT\n", buf[43];
+    fgets(buf, 43, f);
+    if (strcmp(header, buf))
+        fprintf(f, "%s", header);
+    // fseek(f, 0, SEEK_END);
+    for (size_t i = 0; i < count; i++)
+    {
+        r = recs[i];
+        for(int j = 0; j < r.final.numGuesses; j++){
+            gs = r.guesses[j];
+            fprintf(f, "%s,%d,%c,%.17g,%s,%c\n", r.final.word, j, gs.letter, gs.data, STRAT_NAMES[gs.strat], gs.right ? 'Y' : 'N');
+        }
+    }
+    fclose(f);
+}
+Game games[NUM_GAMES];
+GameRec recs[NUM_GAMES*2];
 int main()
 {
-    // GameRec r;
-    size_t runs = 30;
-    Game games[runs];
-    botHostMany(games, runs);
-    for (unsigned int i = 0; i < runs; i++)
+    botHostMany(games, NUM_GAMES);
+#pragma omp parallel for
+    for (int i = 0; i < NUM_GAMES; i++)
     {
-        saveGameRec(printGameRec(playBotEntr(games[i], false)), "records.csv");
+        recs[i] = playBotEntr(games[i], false);
+        recs[NUM_GAMES+i] = playBotProb(games[i], false);
     }
+    saveGameRecs(recs, NUM_GAMES * 2, "records.csv");
     free(dict);
     return 0;
 }
