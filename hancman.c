@@ -8,13 +8,16 @@
 #include <math.h>
 #include "regex.h"
 #include <omp.h>
-#define NUM_GAMES 512
+#ifndef NUM_GAMES
+    #define NUM_GAMES 256
+#endif
+#define HEADER "WORD,GUESS #,LETTER,DATA,STRATEGY,CORRECT"
 typedef uint32_t LSet; // Letter Set
 typedef struct Game Game;
 typedef struct Guess Guess;
 typedef struct GameRec GameRec;
-static char *dict;
-static size_t numWords;
+char *dict;
+size_t totalWords;
 size_t readDict();
 Game humanHost();
 Game botHost();
@@ -28,9 +31,9 @@ int compare(const void *a, const void *b)
 }
 void botHostMany(Game *gameArr, size_t count);
 GameRec playHuman(Game g);
-GameRec playBotProb(Game g, bool print);
+void playBotProb(Game g, bool print, GameRec *rec);
 Guess guessProb(Game *g, char *dict, bool print, char *newDict);
-GameRec playBotEntr(Game g, bool print);
+void playBotEntr(Game g, bool print, GameRec *rec);
 Guess guessEntr(Game *g, char *dict, bool print, char *newDict);
 static inline double binaryEntropy(double p)
 {
@@ -65,7 +68,7 @@ struct Game
 {
     char word[16];
     int lives, wordLen, numGuesses;
-    LSet right, guessed, wrongs;
+    LSet right, guessed;
     bool done;
 };
 void drawGame(Game g);
@@ -78,7 +81,7 @@ enum Strategies
     PROBABILITY,
     ENTROPY
 };
-char *STRAT_NAMES[3] = {"HUMAN", "PROBABILITY", "ENTROPY"};
+const char *STRAT_NAMES[3] = {"HUMAN", "PROBABILITY", "ENTROPY"};
 struct Guess
 {
     Game state;
@@ -92,29 +95,33 @@ struct GameRec
     Guess guesses[26];
     Game final;
 };
-GameRec printGameRec(GameRec r);
+void printGameRec(GameRec r);
 void saveGameRec(GameRec r, char *fileName);
 void saveGameRecs(GameRec *r, size_t count, char *fileName);
+static inline LSet getWrongs(Game g)
+{
+    return g.guessed & ~g.right;
+}
 size_t readDict()
 {
     if (dict != NULL)
-        return numWords;
+        return totalWords;
     FILE *f = fopen("dictionary.txt", "r");
     fseek(f, 0, SEEK_END);
     dict = malloc(ftell(f));
     rewind(f);
-    static char word[17];
-    while (fgets(word, 17, f) != NULL)
+    char word[16];
+    while (fgets(word, 16, f) != NULL)
     {
         strncat(dict, word, 16);
-        ++numWords;
+        ++totalWords;
     }
     fclose(f);
-    return numWords;
+    return totalWords;
 }
 Game humanHost()
 {
-    static char wordInput[16];
+    char wordInput[16];
     printf("\nPlaying 2-Player!\nEXECUTIONER, input a word: \033[8m");
     while (!scanf("%15s", wordInput))
         ;
@@ -127,8 +134,8 @@ Game botHost()
     FILE *f = fopen("dictionary.txt", "r");
     readDict();
     size_t wordIndex;
-    static char word[20];
-    wordIndex = ((((size_t)rand()) << 32) | rand()) % numWords;
+    char word[20];
+    wordIndex = ((((size_t)rand()) << 32) | rand()) % totalWords;
     for (size_t i = 0; i < wordIndex; i++)
         while (!fscanf(f, "%15s", word))
             ;
@@ -143,17 +150,18 @@ void botHostMany(Game *gameArr, size_t count)
     FILE *f = fopen("dictionary.txt", "r");
     readDict();
     size_t wordIndices[count], wordIndexMax = 0, currGame = 0;
-    static char word[20];
+    char word[20];
     for (size_t i = 0; i < count; i++)
     {
-        wordIndices[i] = ((((size_t)rand()) << 32) | rand()) % numWords;
+        wordIndices[i] = ((((size_t)rand()) << 32) | rand()) % totalWords;
         if (wordIndices[i] > wordIndexMax)
             wordIndexMax = wordIndices[i];
     }
     qsort(wordIndices, count, sizeof(size_t), &compare);
     for (size_t i = 0; i <= wordIndexMax; i++)
     {
-        fscanf(f, "%15s", word);
+        while (!fscanf(f, "%15s", word))
+            ;
         if (i == wordIndices[currGame])
         {
             gameArr[currGame] = newGame(word);
@@ -195,78 +203,77 @@ GameRec playHuman(Game g)
     rec.final = g;
     return rec;
 }
-GameRec playBotProb(Game g, bool print)
+void playBotProb(Game g, bool print, GameRec *rec)
 {
-    GameRec rec;
     readDict();
-    char dictPre[numWords * (g.wordLen + 1)], dictPost[numWords * (g.wordLen + 1)];
+    char dictPre[totalWords * (g.wordLen + 1)], dictPost[totalWords * (g.wordLen + 1)];
     if (print)
         drawGame(g);
-    rec.guesses[0] = guessProb(&g, dict, print, dictPre);
+    rec->guesses[0] = guessProb(&g, dict, print, dictPre);
     for (int i = 1; !g.done; i++)
     {
         if (print)
             drawGame(g);
-        rec.guesses[i] = guessProb(&g, i % 2 ? dictPre : dictPost, print, i % 2 ? dictPost : dictPre);
+        rec->guesses[i] = guessProb(&g, i % 2 ? dictPre : dictPost, print, i % 2 ? dictPost : dictPre);
     }
     if (print)
     {
         drawGame(g);
         printf("You %s after %d guesses! The word was: %s", g.lives > 0 ? "won" : "lost", g.numGuesses, g.word);
     }
-    rec.final = g;
-    return rec;
+    rec->final = g;
 }
 Guess guessProb(Game *g, char *dict, bool print, char *newDict)
 {
-    size_t maxN;
-    char maxL;
+    size_t occurs[26], numWords = 0;
+    double currProb, maxProb = 0;
+    char maxL = 'A';
     regex_t pat;
-    size_t occurs[26];
     compPattern(&pat, *g);
     memset(occurs, 0, sizeof(occurs));
-    writeOccurances(occurs, g->guessed, g->wordLen, dict, newDict, &pat, NULL);
-    maxL = 'A';
-    maxN = occurs[0];
+    writeOccurances(occurs, g->guessed, g->wordLen, dict, newDict, &pat, &numWords);
+    if (print)
+        printf("%lu words\n", numWords);
     for (int i = 0; i < 26; i++)
     {
+        if (occurs[i] == 0)
+            continue;
+        currProb = occurs[i] / (double)numWords;
         if (print)
-            printf("%c: %lu | ", 'A' + i, occurs[i]);
-        if (occurs[i] > maxN)
+            printf("%c: %lu, %.17g| ", 'A' + i, occurs[i], currProb);
+        if (currProb > maxProb)
         {
             maxL = 'A' + i;
-            maxN = occurs[i];
+            maxProb = currProb;
         }
     }
     if (print)
-        printf("Max: %c(%lu)\n", maxL, maxN);
-    return (Guess){*g, maxL, maxN, PROBABILITY, guess(g, maxL)};
+        printf("Max: %c(%.17g)\n", maxL, maxProb);
+    return (Guess){*g, maxL, maxProb, PROBABILITY, guess(g, maxL)};
 }
-GameRec playBotEntr(Game g, bool print)
+void playBotEntr(Game g, bool print, GameRec *rec)
 {
     readDict();
-    GameRec rec;
-    char dictPre[numWords * (g.wordLen + 1)], dictPost[numWords * (g.wordLen + 1)];
+    char dictPre[totalWords * (g.wordLen + 1)], dictPost[totalWords * (g.wordLen + 1)];
     if (print)
         drawGame(g);
-    rec.guesses[0] = guessEntr(&g, dict, print, dictPre);
+    rec->guesses[0] = guessEntr(&g, dict, print, dictPre);
     for (int i = 1; !g.done; i++)
     {
         if (print)
             drawGame(g);
-        rec.guesses[i] = guessEntr(&g, i % 2 ? dictPre : dictPost, print, i % 2 ? dictPost : dictPre);
+        rec->guesses[i] = guessEntr(&g, i % 2 ? dictPre : dictPost, print, i % 2 ? dictPost : dictPre);
     }
     if (print)
     {
         drawGame(g);
         printf("You %s after %d guesses! The word was: %s", g.lives > 0 ? "won" : "lost", g.numGuesses, g.word);
     }
-    rec.final = g;
-    return rec;
+    rec->final = g;
 }
 Guess guessEntr(Game *g, char *dict, bool print, char *newDict)
 {
-    size_t occurs[26], numWords;
+    size_t occurs[26], numWords = 0;
     double currProb, currEnt, maxEnt = 0;
     char maxL = 'A';
     regex_t pat;
@@ -333,11 +340,11 @@ int compPattern(regex_t *dest, Game g)
 {
     char negLetters[26], neg[26 + 3];
     int negLen;
-    if (g.wrongs == (LSet)0)
+    if (getWrongs(g) == (LSet)0)
         strcpy(neg, ".");
     else
     {
-        lSetToStr(negLetters, g.wrongs);
+        lSetToStr(negLetters, getWrongs(g));
         sprintf(neg, "[^%s]", negLetters);
     }
     negLen = strlen(neg);
@@ -382,7 +389,7 @@ void drawGame(Game g)
 }
 Game newGame(char *word)
 {
-    Game g = {.lives = 6, .wordLen = strlen(word), .numGuesses = 0, .right = strToLSet(word), .guessed = (LSet)0, .wrongs = (LSet)0, .done = false};
+    Game g = {.lives = 6, .wordLen = strlen(word), .numGuesses = 0, .right = strToLSet(word), .guessed = (LSet)0, .done = false};
     for (int i = 0; word[i]; i++)
         g.word[i] = word[i];
     return g;
@@ -395,7 +402,6 @@ bool guess(Game *g, char l)
         toggL(&(g->guessed), toupper(l));
         if (!getL(g->right, l))
         {
-            setL(&(g->wrongs), l, 1);
             if (--g->lives <= 0)
             {
                 g->done = true;
@@ -473,7 +479,7 @@ void printLSet(LSet s)
     }
     printf("\n");
 }
-GameRec printGameRec(GameRec r)
+void printGameRec(GameRec r)
 {
     Guess gs;
     printf("\nLETTER\t|DATA\t\t|STRAT\t\t|IN \"%s\"\n", r.final.word);
@@ -482,16 +488,17 @@ GameRec printGameRec(GameRec r)
         gs = r.guesses[i];
         printf("%c\t|%8f\t|%-8s\t|%s\n", gs.letter, gs.data, STRAT_NAMES[gs.strat], gs.right ? "Y" : "N");
     }
-    return r;
 }
 void saveGameRec(GameRec r, char *fileName)
 {
     Guess gs;
     FILE *f = fopen(fileName, "a+");
-    char header[43] = "WORD,GUESS #,LETTER,DATA,STRATEGY,CORRECT\n", buf[43];
-    fgets(buf, 43, f);
-    if (strcmp(header, buf))
-        fprintf(f, "%s", header);
+    char buf[strlen(HEADER)];
+    if (fgets(buf, strlen(HEADER), f) != NULL)
+    {
+        if (strncmp(HEADER, buf, strlen(HEADER)))
+            fprintf(f, "%s\n", HEADER);
+    }
     fseek(f, 0, SEEK_END);
     for (int i = 0; i < r.final.numGuesses; i++)
     {
@@ -501,18 +508,26 @@ void saveGameRec(GameRec r, char *fileName)
 }
 void saveGameRecs(GameRec *recs, size_t count, char *fileName)
 {
-    GameRec r;
-    Guess gs;
+    GameRec r = recs[0];
+    Guess gs = r.guesses[0];
     FILE *f = fopen(fileName, "a+");
-    char header[43] = "WORD,GUESS #,LETTER,DATA,STRATEGY,CORRECT\n", buf[43];
-    fgets(buf, 43, f);
-    if (strcmp(header, buf))
-        fprintf(f, "%s", header);
-    // fseek(f, 0, SEEK_END);
+    size_t headerLen = strlen(HEADER) + 1;
+    char buf[headerLen];
+    if (fgets(buf, headerLen, f) == NULL || strncmp(HEADER, buf, headerLen))
+    {
+        printf("%s %d", buf, strncmp(HEADER, buf, headerLen));
+        fprintf(f, "%s\n", HEADER);
+    }
     for (size_t i = 0; i < count; i++)
     {
         r = recs[i];
-        for(int j = 0; j < r.final.numGuesses; j++){
+        if (r.guesses[0].data == 0)
+        {
+            printf("failed on %lu", i);
+            printGameRec(r);
+        }
+        for (int j = 0; j < r.final.numGuesses; j++)
+        {
             gs = r.guesses[j];
             fprintf(f, "%s,%d,%c,%.17g,%s,%c\n", r.final.word, j, gs.letter, gs.data, STRAT_NAMES[gs.strat], gs.right ? 'Y' : 'N');
         }
@@ -520,15 +535,17 @@ void saveGameRecs(GameRec *recs, size_t count, char *fileName)
     fclose(f);
 }
 Game games[NUM_GAMES];
-GameRec recs[NUM_GAMES*2];
+GameRec recs[NUM_GAMES * 2];
 int main()
 {
     botHostMany(games, NUM_GAMES);
 #pragma omp parallel for
     for (int i = 0; i < NUM_GAMES; i++)
     {
-        recs[i] = playBotEntr(games[i], false);
-        recs[NUM_GAMES+i] = playBotProb(games[i], false);
+        playBotEntr(games[i], false, &recs[i]);
+        if (recs[i].guesses[0].data == 0)
+            printf("uh oh %d\n", i);
+        playBotProb(games[i], false, &recs[NUM_GAMES + i]);
     }
     saveGameRecs(recs, NUM_GAMES * 2, "records.csv");
     free(dict);
