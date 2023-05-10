@@ -9,7 +9,7 @@
 #include "regex.h"
 #include <omp.h>
 #ifndef NUM_GAMES
-    #define NUM_GAMES 256
+#define NUM_GAMES 256
 #endif
 #define HEADER "WORD,GUESS #,LETTER,DATA,STRATEGY,CORRECT"
 typedef uint32_t LSet; // Letter Set
@@ -59,7 +59,10 @@ static inline bool setL(LSet *set, char l, bool val) // Sets set[l] to val
     }
     return false;
 }
-bool lSubset(LSet A, LSet B);
+static inline bool lSubset(LSet A, LSet B)
+{
+    return (A & B) == A;
+}
 LSet strToLSet(char *str);
 void lSetToStr(char *dest, LSet l);
 void printBlanks(char *word, LSet guessed);
@@ -73,6 +76,10 @@ struct Game
 };
 void drawGame(Game g);
 Game newGame(char *word);
+Game partialGameFromBlanks(char *currBlanks, LSet guessed, int numGuesses);
+static inline bool isPartialGame(Game g){
+    return !g.done && lSubset(g.right, g.guessed);
+}
 bool guess(Game *g, char l);
 char getGuessInput(LSet guessed);
 enum Strategies
@@ -389,9 +396,29 @@ void drawGame(Game g)
 }
 Game newGame(char *word)
 {
-    Game g = {.lives = 6, .wordLen = strlen(word), .numGuesses = 0, .right = strToLSet(word), .guessed = (LSet)0, .done = false};
+    Game g = {.lives = 6, .wordLen = 0, .numGuesses = 0, .right = (LSet)0, .guessed = (LSet)0, .done = false};
     for (int i = 0; word[i]; i++)
+    {
         g.word[i] = word[i];
+        g.wordLen++;
+        toggL(&g.right, toupper(word[i]));
+    }
+    return g;
+}
+Game partialGameFromBlanks(char *currBlanks, LSet guessed, int numGuesses)
+{
+    Game g = {.lives = 6-numGuesses, .wordLen = 0, .numGuesses = numGuesses, .right = (LSet)0, .guessed = guessed, .done = true};
+    for (int i = 0; currBlanks[i]; i++)
+    {
+        g.word[i] = currBlanks[i];
+        g.wordLen++;
+        if (isalpha(currBlanks[i]))
+        {
+            toggL(&g.right, toupper(currBlanks[i]));
+        }else if(g.done){
+            g.done = false;
+        }
+    }
     return g;
 }
 bool guess(Game *g, char l)
@@ -436,10 +463,6 @@ char getGuessInput(LSet guessed)
     return guess;
 }
 
-bool lSubset(LSet A, LSet B)
-{
-    return (A & B) == A;
-}
 LSet strToLSet(char *str)
 {
     LSet s = 0;
@@ -547,7 +570,7 @@ int main()
             printf("uh oh %d\n", i);
         playBotProb(games[i], false, &recs[NUM_GAMES + i]);
     }
-    saveGameRecs(recs, NUM_GAMES * 2, "records.csv");
+    saveGameRecs(recs, NUM_GAMES * 2, "currOut.csv");
     free(dict);
     return 0;
 }
