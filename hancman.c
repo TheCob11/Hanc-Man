@@ -77,7 +77,8 @@ struct Game
 void drawGame(Game g);
 Game newGame(char *word);
 Game partialGameFromBlanks(char *currBlanks, LSet guessed, int numGuesses);
-static inline bool isPartialGame(Game g){
+static inline bool isPartialGame(Game g)
+{
     return !g.done && lSubset(g.right, g.guessed);
 }
 bool guess(Game *g, char l);
@@ -117,10 +118,10 @@ size_t readDict()
     fseek(f, 0, SEEK_END);
     dict = malloc(ftell(f));
     rewind(f);
-    char word[16];
-    while (fgets(word, 16, f) != NULL)
+    char word[17];
+    while (fgets(word, 17, f) != NULL)
     {
-        strncat(dict, word, 16);
+        strncat(dict, word, 17);
         ++totalWords;
     }
     fclose(f);
@@ -407,7 +408,7 @@ Game newGame(char *word)
 }
 Game partialGameFromBlanks(char *currBlanks, LSet guessed, int numGuesses)
 {
-    Game g = {.lives = 6-numGuesses, .wordLen = 0, .numGuesses = numGuesses, .right = (LSet)0, .guessed = guessed, .done = true};
+    Game g = {.lives = 6 - numGuesses, .wordLen = 0, .numGuesses = numGuesses, .right = (LSet)0, .guessed = guessed, .done = true};
     for (int i = 0; currBlanks[i]; i++)
     {
         g.word[i] = currBlanks[i];
@@ -415,7 +416,9 @@ Game partialGameFromBlanks(char *currBlanks, LSet guessed, int numGuesses)
         if (isalpha(currBlanks[i]))
         {
             toggL(&g.right, toupper(currBlanks[i]));
-        }else if(g.done){
+        }
+        else if (g.done)
+        {
             g.done = false;
         }
     }
